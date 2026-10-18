@@ -1,0 +1,73 @@
+# On a push to main: build this project's container images and push them to ghcr.io.
+# Flux, in the cluster, sees the new main-<commit>-<commit time> tag and deploys it (repo Fleet).
+# The VPS never builds anything, and nothing here logs in to it.
+name: image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/image.yml'
+  # also a "Run workflow" button on the Actions page
+  workflow_dispatch:
+
+# only pushes to this repository run it; a pull request from a fork never does
+permissions:
+  contents: read
+  packages: write
+
+# two pushes in a row run one after the other, never at once
+concurrency: image
+
+jobs:
+  # the tests (among them: nothing internal reaches the public output) and the type check. A red
+  # check means no image, so nothing is deployed.
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  build:
+    needs: check
+    # an ARM machine, the same kind of CPU as the VPS
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # the commit's own time, for the tag Flux sorts by: re-running an old run never sorts above a newer build
+      - name: commit time
+        id: ts
+        run: echo "ts=$(git show -s --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: backend
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/remuriin/ops-api:${{ github.sha }}
+            ghcr.io/remuriin/ops-api:main
+            ghcr.io/remuriin/ops-api:main-${{ github.sha }}-${{ steps.ts.outputs.ts }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/remuriin/RemOps
